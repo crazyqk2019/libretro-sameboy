@@ -1,29 +1,50 @@
-VERSION     := 0.13.1
+include $(CORE_DIR)/version.mk
 
-INCFLAGS    := -I$(CORE_DIR)
+LIBRETRO_COMM_DIR := $(CORE_DIR)/libretro/libretro-common
 
-SOURCES_C   := $(CORE_DIR)/Core/gb.c \
-               $(CORE_DIR)/Core/sgb.c \
-               $(CORE_DIR)/Core/apu.c \
-               $(CORE_DIR)/Core/memory.c \
-               $(CORE_DIR)/Core/mbc.c \
-               $(CORE_DIR)/Core/random.c \
-               $(CORE_DIR)/Core/timing.c \
-               $(CORE_DIR)/Core/display.c \
-               $(CORE_DIR)/Core/symbol_hash.c \
-               $(CORE_DIR)/Core/camera.c \
-               $(CORE_DIR)/Core/sm83_cpu.c \
-               $(CORE_DIR)/Core/joypad.c \
-               $(CORE_DIR)/Core/save_state.c \
-               $(CORE_DIR)/Core/rumble.c \
-               $(CORE_DIR)/libretro/agb_boot.c \
-               $(CORE_DIR)/libretro/cgb_boot.c \
-               $(CORE_DIR)/libretro/dmg_boot.c \
-               $(CORE_DIR)/libretro/sgb_boot.c \
-               $(CORE_DIR)/libretro/sgb2_boot.c \
-               $(CORE_DIR)/libretro/libretro.c
+INCFLAGS := \
+   -I$(CORE_DIR) \
+   -I$(LIBRETRO_COMM_DIR)/include
+
+SOURCES_C := \
+   $(CORE_DIR)/Core/gb.c \
+   $(CORE_DIR)/Core/sgb.c \
+   $(CORE_DIR)/Core/apu.c \
+   $(CORE_DIR)/Core/memory.c \
+   $(CORE_DIR)/Core/mbc.c \
+   $(CORE_DIR)/Core/timing.c \
+   $(CORE_DIR)/Core/display.c \
+   $(CORE_DIR)/Core/symbol_hash.c \
+   $(CORE_DIR)/Core/camera.c \
+   $(CORE_DIR)/Core/sm83_cpu.c \
+   $(CORE_DIR)/Core/joypad.c \
+   $(CORE_DIR)/Core/save_state.c \
+   $(CORE_DIR)/Core/random.c \
+   $(CORE_DIR)/Core/rumble.c \
+   $(CORE_DIR)/libretro/agb_boot.c \
+   $(CORE_DIR)/libretro/cgb_boot.c \
+   $(CORE_DIR)/libretro/dmg_boot.c \
+   $(CORE_DIR)/libretro/sgb_boot.c \
+   $(CORE_DIR)/libretro/sgb2_boot.c \
+   $(CORE_DIR)/libretro/libretro.c
+
+ifneq ($(STATIC_LINKING), 1)
+   SOURCES_C += \
+      $(LIBRETRO_COMM_DIR)/compat/compat_posix_string.c \
+      $(LIBRETRO_COMM_DIR)/compat/compat_snprintf.c \
+      $(LIBRETRO_COMM_DIR)/compat/compat_strcasestr.c \
+      $(LIBRETRO_COMM_DIR)/compat/compat_strl.c \
+      $(LIBRETRO_COMM_DIR)/compat/fopen_utf8.c \
+      $(LIBRETRO_COMM_DIR)/encodings/encoding_utf.c \
+      $(LIBRETRO_COMM_DIR)/file/file_path.c \
+      $(LIBRETRO_COMM_DIR)/file/file_path_io.c \
+      $(LIBRETRO_COMM_DIR)/streams/file_stream.c \
+      $(LIBRETRO_COMM_DIR)/streams/file_stream_transforms.c \
+      $(LIBRETRO_COMM_DIR)/string/stdstring.c \
+      $(LIBRETRO_COMM_DIR)/time/rtime.c \
+      $(LIBRETRO_COMM_DIR)/vfs/vfs_implementation.c
+endif
 
 CFLAGS += -DGB_DISABLE_TIMEKEEPING -DGB_DISABLE_REWIND -DGB_DISABLE_DEBUGGER -DGB_DISABLE_CHEATS
-
 
 SOURCES_CXX :=	

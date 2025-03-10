@@ -1,26 +1,26 @@
 #include "gb.h"
 
-static signed noise_seed = 0;
+static uint32_t noise_seed = 0;
 
-/* This is not a complete emulation of the camera chip. Only the features used by the GameBoy Camera ROMs are supported.
-    We also do not emulate the timing of the real cart, as it might be actually faster than the webcam. */
+/* This is not a complete emulation of the camera chip. Only the features used by the Game Boy Camera ROMs are supported.
+    We also do not emulate the timing of the real cart when a webcam is used, as it might be actually faster than the webcam. */
 
 static uint8_t generate_noise(uint8_t x, uint8_t y)
 {
-    signed value = (x + y * 128 + noise_seed);
-    uint8_t *data = (uint8_t *) &value;
-    unsigned hash = 0;
+    uint32_t value = (x * 151 + y * 149) ^ noise_seed;
+    uint32_t hash = 0;
 
-    while ((signed *) data != &value + 1) {
-        hash ^= (*data << 8);
-        if (hash & 0x8000) {
-            hash ^= 0x8a00;
-            hash ^= *data;
-        }
-        data++;
+    while (value) {
         hash <<= 1;
+        if (hash & 0x100) {
+            hash ^= 0x101;
+        }
+        if (value & 0x80000000) {
+            hash ^= 0xA1;
+        }
+        value <<= 1;
     }
-    return (hash >> 8);
+    return hash;
 }
 
 static long get_processed_color(GB_gameboy_t *gb, uint8_t x, uint8_t y)
@@ -55,10 +55,6 @@ static long get_processed_color(GB_gameboy_t *gb, uint8_t x, uint8_t y)
 
 uint8_t GB_camera_read_image(GB_gameboy_t *gb, uint16_t addr)
 {
-    if (gb->camera_registers[GB_CAMERA_SHOOT_AND_1D_FLAGS] & 1) {
-        /* Forbid reading the image while the camera is busy. */
-        return 0xFF;
-    }
     uint8_t tile_x = addr / 0x10 % 0x10;
     uint8_t tile_y = addr / 0x10 / 0x10;
 
@@ -112,6 +108,12 @@ void GB_set_camera_get_pixel_callback(GB_gameboy_t *gb, GB_camera_get_pixel_call
 
 void GB_set_camera_update_request_callback(GB_gameboy_t *gb, GB_camera_update_request_callback_t callback)
 {
+    if (gb->camera_countdown > 0 && callback) {
+        GB_log(gb, "Camera update request callback set while camera was proccessing, clearing camera countdown.\n");
+        gb->camera_countdown = 0;
+        GB_camera_updated(gb);
+    }
+
     gb->camera_update_request_callback = callback;
 }
 
@@ -125,12 +127,25 @@ void GB_camera_write_register(GB_gameboy_t *gb, uint16_t addr, uint8_t value)
     addr &= 0x7F;
     if (addr == GB_CAMERA_SHOOT_AND_1D_FLAGS) {
         value &= 0x7;
-        noise_seed = rand();
-        if ((value & 1) && !(gb->camera_registers[GB_CAMERA_SHOOT_AND_1D_FLAGS] & 1) && gb->camera_update_request_callback) {
-            /* If no callback is set, ignore the write as if the camera is instantly done */
-            gb->camera_registers[GB_CAMERA_SHOOT_AND_1D_FLAGS] |= 1;
-            gb->camera_update_request_callback(gb);
+        noise_seed = GB_random();
+        if ((value & 1) && !(gb->camera_registers[GB_CAMERA_SHOOT_AND_1D_FLAGS] & 1)) {
+            if (gb->camera_update_request_callback) {
+                gb->camera_update_request_callback(gb);
+            }
+            else {
+                /* If no callback is set, wait the amount of time the real camera would take before clearing the busy bit */
+                uint16_t exposure = (gb->camera_registers[GB_CAMERA_EXPOSURE_HIGH] << 8) | gb->camera_registers[GB_CAMERA_EXPOSURE_LOW];
+                gb->camera_countdown = 129792 + ((gb->camera_registers[GB_CAMERA_GAIN_AND_EDGE_ENHACEMENT_FLAGS] & 0x80)? 0 : 2048) + (exposure * 64) + (gb->camera_alignment & 4);
+            }
         }
+
+        if (!(value & 1) && (gb->camera_registers[GB_CAMERA_SHOOT_AND_1D_FLAGS] & 1)) {
+            /* We don't support cancelling a camera shoot */
+            GB_log(gb, "ROM attempted to cancel camera shoot, which is currently not supported. The camera shoot will not be cancelled.\n");
+            value |= 1;
+        }
+
+        gb->camera_registers[GB_CAMERA_SHOOT_AND_1D_FLAGS] = value;
     }
     else {
         if (addr >= 0x36) {

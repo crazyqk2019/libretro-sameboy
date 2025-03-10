@@ -17,8 +17,6 @@ filter_out2 = $(call filter_out1,$(call filter_out1,$1))
 unixpath = $(subst \,/,$1)
 unixcygpath = /$(subst :,,$(call unixpath,$1))
 
-CFLAGS += -DSAMEBOY_CORE_VERSION=\"$(VERSION)\"
-
 ifeq ($(platform),)
 platform = unix
 ifeq ($(shell uname -a),)
@@ -43,6 +41,9 @@ else ifneq ($(findstring Darwin,$(shell uname -a)),)
 ifeq ($(shell uname -p),powerpc)
 	arch = ppc
 endif
+	ifeq ($(shell uname -p),arm)
+		arch = arm
+	endif
 else ifneq ($(findstring MINGW,$(shell uname -a)),)
 	system_platform = win
 endif
@@ -51,30 +52,16 @@ ifeq ($(platform), win)
 	INCFLAGS += -I Windows
 endif
 
-CORE_DIR     = ../
+CORE_DIR     = ..
 
 TARGET_NAME  = sameboy
-LIBM		    = -lm
+LIBM         = -lm
 
-ifeq ($(ARCHFLAGS),)
-ifeq ($(archs),ppc)
-   ARCHFLAGS = -arch ppc -arch ppc64
-else
-   ARCHFLAGS = -arch i386 -arch x86_64
-endif
-endif
 
 ifneq ($(SANITIZER),)
    CFLAGS   := -fsanitize=$(SANITIZER) $(CFLAGS)
    CXXFLAGS := -fsanitize=$(SANITIZER) $(CXXFLAGS)
    LDFLAGS  := -fsanitize=$(SANITIZER) $(LDFLAGS) -lasan
-endif
-
-ifeq ($(platform), osx)
-ifndef ($(NOUNIVERSAL))
-   CFLAGS += $(ARCHFLAGS)
-   LFLAGS += $(ARCHFLAGS)
-endif
 endif
 
 ifeq ($(STATIC_LINKING), 1)
@@ -90,11 +77,10 @@ else ifeq ($(platform), linux-portable)
    TARGET := $(TARGET_NAME)_libretro.$(EXT)
    fpic := -fPIC -nostdlib
    SHARED := -shared -Wl,--version-script=$(CORE_DIR)/libretro/link.T
-	LIBM :=
-  
+   LIBM :=   
 # (armv7 a7, hard point, neon based) ### 
 # NESC, SNESC, C64 mini 
-else ifeq ($(platform), classic_armv7_a7)
+else ifeq ($(platform),$(filter $(platform),classic_armv7_a7 unix-armv7-hardfloat-neon))
 	TARGET := $(TARGET_NAME)_libretro.so
 	fpic := -fPIC
   SHARED := -shared -Wl,--version-script=$(CORE_DIR)/libretro/link.T -Wl,--no-undefined
@@ -122,8 +108,18 @@ else ifeq ($(platform), classic_armv7_a7)
 	    LDFLAGS += -static-libgcc -static-libstdc++
 	  endif
 	endif
-#######################################
 
+###########################
+# Raspberry Pi 4 in 64 mode
+else ifneq (,$(findstring rpi4_64,$(platform)))
+   EXT ?= so
+   TARGET := $(TARGET_NAME)_libretro.$(EXT)
+   fpic := -fPIC
+   SHARED := -shared -Wl,--version-script=$(CORE_DIR)/libretro/link.T -Wl,--no-undefined
+   CFLAGS += -O2 -march=armv8-a+crc+simd -mtune=cortex-a72
+###########################
+
+#######################################
 # Nintendo Switch (libtransistor)
 else ifeq ($(platform), switch)
    TARGET := $(TARGET_NAME)_libretro_$(platform).a
@@ -144,17 +140,47 @@ else ifeq ($(platform), wiiu)
    TARGET := $(TARGET_NAME)_libretro_$(platform).a
    CC = $(DEVKITPPC)/bin/powerpc-eabi-gcc$(EXE_EXT)
    AR = $(DEVKITPPC)/bin/powerpc-eabi-ar$(EXE_EXT)
-   CFLAGS += -DGEKKO -DHW_RVL -DWIIU -mwup -mcpu=750 -meabi -mhard-float -D__ppc__ -DMSB_FIRST -I$(DEVKITPRO)/libogc/include
-   CFLAGS += -U__INT32_TYPE__ -U __UINT32_TYPE__ -D__INT32_TYPE__=int
+   CFLAGS += -DGEKKO -DHW_RVL -DWIIU -mcpu=750 -meabi -mhard-float -D__ppc__ -DMSB_FIRST -I$(DEVKITPRO)/libogc/include
+   CFLAGS += -ffunction-sections -fdata-sections -D__wiiu__ -D__wut__
    STATIC_LINKING = 1
 else ifneq (,$(findstring osx,$(platform)))
    TARGET := $(TARGET_NAME)_libretro.dylib
    fpic := -fPIC
    SHARED := -dynamiclib
+   MACSOSVER = `sw_vers -productVersion | cut -d. -f 1`
+   OSXVER = `sw_vers -productVersion | cut -d. -f 2`
+   OSX_LT_MAVERICKS = `(( $(OSXVER) <= 9)) && echo "YES"`
+   MINVERSION :=
+
+ifeq ($(UNIVERSAL),1)
+ifeq ($(archs),ppc)
+   ARCHFLAGS = -arch ppc -arch ppc64
+else ifeq ($(archs),arm64)
+   ARCHFLAGS = -arch x86_64 -arch arm64
+else
+   ARCHFLAGS = -arch i386 -arch x86_64
+endif
+   CFLAGS += $(ARCHFLAGS)
+   LFLAGS += $(ARCHFLAGS)
+endif
+
+   ifeq ($(CROSS_COMPILE),1)
+		TARGET_RULE   = -target $(LIBRETRO_APPLE_PLATFORM) -isysroot $(LIBRETRO_APPLE_ISYSROOT)
+		CFLAGS   += $(TARGET_RULE)
+		CPPFLAGS += $(TARGET_RULE)
+		CXXFLAGS += $(TARGET_RULE)
+		LDFLAGS  += $(TARGET_RULE)
+   endif
+
+	CFLAGS  += $(ARCHFLAGS)
+	CXXFLAGS  += $(ARCHFLAGS)
+	LDFLAGS += $(ARCHFLAGS)
+
 else ifneq (,$(findstring ios,$(platform)))
-   TARGET := $(TARGET_NAME)_libretro_ios.dylib
+        TARGET := $(TARGET_NAME)_libretro_ios.dylib
 	fpic := -fPIC
 	SHARED := -dynamiclib
+        MINVERSION :=
 
 ifeq ($(IOSSDK),)
    IOSSDK := $(shell xcodebuild -version -sdk iphoneos Path)
@@ -162,17 +188,28 @@ endif
 
 	DEFINES := -DIOS
 ifeq ($(platform),ios-arm64)
-   CC = cc -arch armv64 -isysroot $(IOSSDK)
+        CC = cc -arch arm64 -isysroot $(IOSSDK)
 else
-	CC = cc -arch armv7 -isysroot $(IOSSDK)
+        CC = cc -arch armv7 -isysroot $(IOSSDK)
 endif
 ifeq ($(platform),$(filter $(platform),ios9 ios-arm64))
-CC     += -miphoneos-version-min=8.0
-CFLAGS += -miphoneos-version-min=8.0
+        MINVERSION = -miphoneos-version-min=8.0
 else
-CC     += -miphoneos-version-min=5.0
-CFLAGS += -miphoneos-version-min=5.0
+        MINVERSION = -miphoneos-version-min=5.0
 endif
+        CFLAGS += $(MINVERSION)
+
+else ifeq ($(platform), tvos-arm64)
+   EXT?=dylib
+   TARGET := $(TARGET_NAME)_libretro_tvos.$(EXT)
+   fpic := -fPIC
+   SHARED := -dynamiclib
+   DEFINES := -DIOS
+ifeq ($(IOSSDK),)
+   IOSSDK := $(shell xcodebuild -version -sdk appletvos Path)
+endif
+   CC = cc -arch arm64 -isysroot $(IOSSDK)
+
 else ifneq (,$(findstring qnx,$(platform)))
 	TARGET := $(TARGET_NAME)_libretro_qnx.so
    fpic := -fPIC
@@ -182,7 +219,7 @@ else ifeq ($(platform), emscripten)
    fpic := -fPIC
    SHARED := -shared -Wl,--version-script=$(CORE_DIR)/libretro/link.T -Wl,--no-undefined
 else ifeq ($(platform), vita)
-   TARGET := $(TARGET_NAME)_vita.a
+   TARGET := $(TARGET_NAME)_libretro_vita.a
    CC = arm-vita-eabi-gcc
    AR = arm-vita-eabi-ar
    CFLAGS += -Wl,-q -O3 -fno-short-enums -fno-optimize-sibling-calls
@@ -214,9 +251,9 @@ else ifneq (,$(findstring windows_msvc2017,$(platform)))
 
 	TargetArchMoniker = $(subst $(WinPartition)_,,$(PlatformSuffix))
 
-	CC  = cl.exe
-	CXX = cl.exe
-	LD = link.exe
+	CC  ?= cl.exe
+	CXX ?= cl.exe
+	LD  ?= link.exe
 
 	reg_query = $(call filter_out2,$(subst $2,,$(shell reg query "$2" -v "$1" 2>nul)))
 	fix_path = $(subst $(SPACE),\ ,$(subst \,/,$1))
@@ -284,12 +321,11 @@ else ifneq (,$(findstring windows_msvc2017,$(platform)))
 	LDFLAGS += -DLL
 
 else
-   CC = gcc
+   CC ?= gcc
    TARGET := $(TARGET_NAME)_libretro.dll
    SHARED := -shared -static-libgcc -static-libstdc++ -s -Wl,--version-script=$(CORE_DIR)/libretro/link.T -Wl,--no-undefined
 endif
 
-#TARGET := $(CORE_DIR)/build/bin/$(TARGET)
 TARGET := $(TARGET)
 
 # To force use of the Unix version instead of the Windows version
@@ -304,6 +340,8 @@ else
 endif
 
 include Makefile.common
+
+CFLAGS += -DGB_VERSION=\"$(VERSION)\"
 
 OBJECTS := $(patsubst $(CORE_DIR)/%.c,$(CORE_DIR)/build/obj/%_libretro.c.o,$(SOURCES_C))
 
@@ -340,7 +378,6 @@ endif
 	echo "};" >> $@
 	echo "const unsigned $(notdir $(@:%.c=%))_length = sizeof($(notdir $(@:%.c=%)));" >> $@
 
-#$(CORE_DIR)/build/bin/BootROMs/%_boot.bin:
 $(CORE_DIR)/BootROMs/prebuilt/%_boot.bin:
 	$(MAKE) -C $(CORE_DIR) $(patsubst $(CORE_DIR)/%,%,$@)
 

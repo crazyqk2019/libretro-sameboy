@@ -16,18 +16,29 @@ endif
 ifeq ($(PLATFORM),windows32)
 _ := $(shell chcp 65001)
 EXESUFFIX:=.exe
-NATIVE_CC = clang -IWindows -Wno-deprecated-declarations
+NATIVE_CC = clang -IWindows -Wno-deprecated-declarations --target=i386-pc-windows
+SDL_AUDIO_DRIVERS ?= xaudio2 xaudio2_7 sdl
 else
 EXESUFFIX:=
 NATIVE_CC := cc
+SDL_AUDIO_DRIVERS ?= sdl
 endif
 
 PB12_COMPRESS := build/pb12$(EXESUFFIX)
 
 ifeq ($(PLATFORM),Darwin)
 DEFAULT := cocoa
+ENABLE_OPENAL ?= 1
 else
 DEFAULT := sdl
+endif
+
+ifneq ($(shell which xdg-open)$(FREEDESKTOP),)
+# Running on an FreeDesktop environment, configure for (optional) installation
+DESTDIR ?= 
+PREFIX ?= /usr/local
+DATA_DIR ?= $(PREFIX)/share/sameboy/
+FREEDESKTOP ?= true
 endif
 
 default: $(DEFAULT)
@@ -36,10 +47,9 @@ ifeq ($(MAKECMDGOALS),)
 MAKECMDGOALS := $(DEFAULT)
 endif
 
-VERSION := 0.13.3
+include version.mk
 export VERSION
 CONF ?= debug
-SDL_AUDIO_DRIVER ?= sdl
 
 BIN := build/bin
 OBJ := build/obj
@@ -60,7 +70,10 @@ endif
 
 # Find libraries with pkg-config if available.
 ifneq (, $(shell which pkg-config))
+# But not on macOS, it's annoying
+ifneq ($(PLATFORM),Darwin)
 PKG_CONFIG := pkg-config
+endif
 endif
 
 ifeq ($(PLATFORM),windows32)
@@ -98,34 +111,65 @@ OPEN_DIALOG = OpenDialog/cocoa.m
 endif
 
 # These must come before the -Wno- flags
-WARNINGS += -Werror -Wall -Wno-unknown-warning -Wno-unknown-warning-option
-WARNINGS += -Wno-nonnull -Wno-unused-result -Wno-strict-aliasing -Wno-multichar -Wno-int-in-bool-context
+WARNINGS += -Werror -Wall -Wno-unknown-warning -Wno-unknown-warning-option -Wno-missing-braces
+WARNINGS += -Wno-nonnull -Wno-unused-result -Wno-strict-aliasing -Wno-multichar -Wno-int-in-bool-context -Wno-format-truncation
 
 # Only add this flag if the compiler supports it
 ifeq ($(shell $(CC) -x c -c $(NULL) -o $(NULL) -Werror -Wpartial-availability 2> $(NULL); echo $$?),0)
 WARNINGS += -Wpartial-availability
 endif
 
+# GCC's implementation of this warning has false positives, so we skip it
+ifneq ($(shell $(CC) --version 2>&1 | grep "gcc"), )
+WARNINGS += -Wno-maybe-uninitialized
+endif
+
 CFLAGS += $(WARNINGS)
 
-CFLAGS += -std=gnu11 -D_GNU_SOURCE -DVERSION="$(VERSION)" -I. -D_USE_MATH_DEFINES
+CFLAGS += -std=gnu11 -D_GNU_SOURCE -DGB_VERSION='"$(VERSION)"' -I. -D_USE_MATH_DEFINES
+ifneq (,$(UPDATE_SUPPORT))
+CFLAGS += -DUPDATE_SUPPORT
+endif
 
 ifeq (,$(PKG_CONFIG))
 SDL_CFLAGS := $(shell sdl2-config --cflags)
-SDL_LDFLAGS := $(shell sdl2-config --libs)
+SDL_LDFLAGS := $(shell sdl2-config --libs) -lpthread
+
+# We cannot detect the presence of OpenAL dev headers,
+# so we must do this manually
+ifeq ($(ENABLE_OPENAL),1)
+SDL_CFLAGS += -DENABLE_OPENAL
+ifeq ($(PLATFORM),Darwin)
+SDL_LDFLAGS += -framework OpenAL
+else
+SDL_LDFLAGS += -lopenal
+endif
+SDL_AUDIO_DRIVERS += openal
+endif
 else
 SDL_CFLAGS := $(shell $(PKG_CONFIG) --cflags sdl2)
-SDL_LDFLAGS := $(shell $(PKG_CONFIG) --libs sdl2)
+SDL_LDFLAGS := $(shell $(PKG_CONFIG) --libs sdl2) -lpthread
+
+# Allow OpenAL to be disabled even if the development libraries are available
+ifneq ($(ENABLE_OPENAL),0)
+ifeq ($(shell $(PKG_CONFIG) --exists openal && echo 0),0)
+SDL_CFLAGS += $(shell $(PKG_CONFIG) --cflags openal) -DENABLE_OPENAL
+SDL_LDFLAGS += $(shell $(PKG_CONFIG) --libs openal)
+SDL_AUDIO_DRIVERS += openal
 endif
+endif
+endif
+
 ifeq (,$(PKG_CONFIG))
 GL_LDFLAGS := -lGL
 else
 GL_CFLAGS := $(shell $(PKG_CONFIG) --cflags gl)
 GL_LDFLAGS := $(shell $(PKG_CONFIG) --libs gl || echo -lGL)
 endif
+
 ifeq ($(PLATFORM),windows32)
-CFLAGS += -IWindows -Drandom=rand
-LDFLAGS += -lmsvcrt -lcomdlg32 -luser32 -lSDL2main -Wl,/MANIFESTFILE:NUL
+CFLAGS += -IWindows -Drandom=rand --target=i386-pc-windows
+LDFLAGS += -lmsvcrt -lcomdlg32 -luser32 -lshell32 -lole32 -lSDL2main -Wl,/MANIFESTFILE:NUL --target=i386-pc-windows
 SDL_LDFLAGS := -lSDL2
 GL_LDFLAGS := -lopengl32
 else
@@ -143,7 +187,7 @@ endif
 
 CFLAGS += -F/Library/Frameworks -mmacosx-version-min=10.9 -isysroot $(SYSROOT)
 OCFLAGS += -x objective-c -fobjc-arc -Wno-deprecated-declarations -isysroot $(SYSROOT)
-LDFLAGS += -framework AppKit -framework PreferencePanes -framework Carbon -framework QuartzCore -weak_framework Metal -weak_framework MetalKit -mmacosx-version-min=10.9 -isysroot $(SYSROOT)
+LDFLAGS += -framework AppKit -framework PreferencePanes -framework Carbon -framework QuartzCore -framework Security -framework WebKit -weak_framework Metal -weak_framework MetalKit -mmacosx-version-min=10.9 -isysroot $(SYSROOT)
 GL_LDFLAGS := -framework OpenGL
 endif
 CFLAGS += -Wno-deprecated-declarations
@@ -157,15 +201,18 @@ CFLAGS += -g
 else ifeq ($(CONF), release)
 CFLAGS += -O3 -DNDEBUG
 STRIP := strip
+CODESIGN := true
 ifeq ($(PLATFORM),Darwin)
 LDFLAGS += -Wl,-exported_symbols_list,$(NULL)
-STRIP := -@true
+STRIP := strip -x
+CODESIGN := codesign -fs -
 endif
-ifneq ($(PLATFORM),windows32)
+ifeq ($(PLATFORM),windows32)
+LDFLAGS +=  -fuse-ld=lld
+endif
 LDFLAGS += -flto
 CFLAGS += -flto
 LDFLAGS += -Wno-lto-type-mismatch # For GCC's LTO
-endif
 
 else
 $(error Invalid value for CONF: $(CONF). Use "debug", "release" or "native_release")
@@ -183,15 +230,15 @@ endif
 
 cocoa: $(BIN)/SameBoy.app
 quicklook: $(BIN)/SameBoy.qlgenerator
-sdl: $(SDL_TARGET) $(BIN)/SDL/dmg_boot.bin $(BIN)/SDL/cgb_boot.bin $(BIN)/SDL/agb_boot.bin $(BIN)/SDL/sgb_boot.bin $(BIN)/SDL/sgb2_boot.bin $(BIN)/SDL/LICENSE $(BIN)/SDL/registers.sym $(BIN)/SDL/background.bmp $(BIN)/SDL/Shaders
-bootroms: $(BIN)/BootROMs/agb_boot.bin $(BIN)/BootROMs/cgb_boot.bin $(BIN)/BootROMs/dmg_boot.bin $(BIN)/BootROMs/sgb_boot.bin $(BIN)/BootROMs/sgb2_boot.bin
+sdl: $(SDL_TARGET) $(BIN)/SDL/dmg_boot.bin $(BIN)/SDL/mgb_boot.bin $(BIN)/SDL/cgb0_boot.bin $(BIN)/SDL/cgb_boot.bin $(BIN)/SDL/agb_boot.bin $(BIN)/SDL/sgb_boot.bin $(BIN)/SDL/sgb2_boot.bin $(BIN)/SDL/LICENSE $(BIN)/SDL/registers.sym $(BIN)/SDL/background.bmp $(BIN)/SDL/Shaders $(BIN)/SDL/Palettes
+bootroms: $(BIN)/BootROMs/agb_boot.bin $(BIN)/BootROMs/cgb_boot.bin $(BIN)/BootROMs/cgb0_boot.bin $(BIN)/BootROMs/dmg_boot.bin $(BIN)/BootROMs/mgb_boot.bin $(BIN)/BootROMs/sgb_boot.bin $(BIN)/BootROMs/sgb2_boot.bin
 tester: $(TESTER_TARGET) $(BIN)/tester/dmg_boot.bin $(BIN)/tester/cgb_boot.bin $(BIN)/tester/agb_boot.bin $(BIN)/tester/sgb_boot.bin $(BIN)/tester/sgb2_boot.bin
 all: cocoa sdl tester libretro
 
 # Get a list of our source files and their respective object file targets
 
 CORE_SOURCES := $(shell ls Core/*.c)
-SDL_SOURCES := $(shell ls SDL/*.c) $(OPEN_DIALOG) SDL/audio/$(SDL_AUDIO_DRIVER).c
+SDL_SOURCES := $(shell ls SDL/*.c) $(OPEN_DIALOG) $(patsubst %,SDL/audio/%.c,$(SDL_AUDIO_DRIVERS))
 TESTER_SOURCES := $(shell ls Tester/*.c)
 
 ifeq ($(PLATFORM),Darwin)
@@ -227,6 +274,10 @@ endif
 $(OBJ)/SDL/%.dep: SDL/%
 	-@$(MKDIR) -p $(dir $@)
 	$(CC) $(CFLAGS) $(SDL_CFLAGS) $(GL_CFLAGS) -MT $(OBJ)/$^.o -M $^ -c -o $@
+	
+$(OBJ)/OpenDialog/%.dep: OpenDialog/%
+	-@$(MKDIR) -p $(dir $@)
+	$(CC) $(CFLAGS) $(SDL_CFLAGS) $(GL_CFLAGS) -MT $(OBJ)/$^.o -M $^ -c -o $@
 
 $(OBJ)/%.dep: %
 	-@$(MKDIR) -p $(dir $@)
@@ -241,6 +292,11 @@ $(OBJ)/Core/%.c.o: Core/%.c
 $(OBJ)/SDL/%.c.o: SDL/%.c
 	-@$(MKDIR) -p $(dir $@)
 	$(CC) $(CFLAGS) $(FAT_FLAGS) $(SDL_CFLAGS) $(GL_CFLAGS) -c $< -o $@
+
+$(OBJ)/OpenDialog/%.c.o: OpenDialog/%.c
+	-@$(MKDIR) -p $(dir $@)
+	$(CC) $(CFLAGS) $(FAT_FLAGS) $(SDL_CFLAGS) $(GL_CFLAGS) -c $< -o $@
+
 
 $(OBJ)/%.c.o: %.c
 	-@$(MKDIR) -p $(dir $@)
@@ -263,6 +319,8 @@ $(BIN)/SameBoy.app: $(BIN)/SameBoy.app/Contents/MacOS/SameBoy \
                     Cocoa/Info.plist \
                     Misc/registers.sym \
                     $(BIN)/SameBoy.app/Contents/Resources/dmg_boot.bin \
+                    $(BIN)/SameBoy.app/Contents/Resources/mgb_boot.bin \
+                    $(BIN)/SameBoy.app/Contents/Resources/cgb0_boot.bin \
                     $(BIN)/SameBoy.app/Contents/Resources/cgb_boot.bin \
                     $(BIN)/SameBoy.app/Contents/Resources/agb_boot.bin \
                     $(BIN)/SameBoy.app/Contents/Resources/sgb_boot.bin \
@@ -278,6 +336,9 @@ $(BIN)/SameBoy.app: $(BIN)/SameBoy.app/Contents/MacOS/SameBoy \
 	cp Shaders/*.fsh Shaders/*.metal $(BIN)/SameBoy.app/Contents/Resources/Shaders
 	$(MKDIR) -p $(BIN)/SameBoy.app/Contents/Library/QuickLook/
 	cp -rf $(BIN)/SameBoy.qlgenerator $(BIN)/SameBoy.app/Contents/Library/QuickLook/
+ifeq ($(CONF), release)
+	$(CODESIGN) $@
+endif
 
 $(BIN)/SameBoy.app/Contents/MacOS/SameBoy: $(CORE_OBJECTS) $(COCOA_OBJECTS)
 	-@$(MKDIR) -p $(dir $@)
@@ -298,12 +359,18 @@ $(BIN)/SameBoy.qlgenerator: $(BIN)/SameBoy.qlgenerator/Contents/MacOS/SameBoyQL 
 	$(MKDIR) -p $(BIN)/SameBoy.qlgenerator/Contents/Resources
 	cp QuickLook/*.png $(BIN)/SameBoy.qlgenerator/Contents/Resources/
 	sed s/@VERSION/$(VERSION)/ < QuickLook/Info.plist > $(BIN)/SameBoy.qlgenerator/Contents/Info.plist
+ifeq ($(CONF), release)
+	$(CODESIGN) $@
+endif
 
 # Currently, SameBoy.app includes two "copies" of each Core .o file once in the app itself and
 # once in the QL Generator. It should probably become a dylib instead.
 $(BIN)/SameBoy.qlgenerator/Contents/MacOS/SameBoyQL: $(CORE_OBJECTS) $(QUICKLOOK_OBJECTS)
 	-@$(MKDIR) -p $(dir $@)
 	$(CC) $^ -o $@ $(LDFLAGS) $(FAT_FLAGS) -Wl,-exported_symbols_list,QuickLook/exports.sym -bundle -framework Cocoa -framework Quicklook
+ifeq ($(CONF), release)
+	$(STRIP) $@
+endif
 
 # cgb_boot_fast.bin is not a standard boot ROM, we don't expect it to exist in the user-provided
 # boot ROM directory.
@@ -319,6 +386,7 @@ $(BIN)/SDL/sameboy: $(CORE_OBJECTS) $(SDL_OBJECTS)
 	$(CC) $^ -o $@ $(LDFLAGS) $(FAT_FLAGS) $(SDL_LDFLAGS) $(GL_LDFLAGS)
 ifeq ($(CONF), release)
 	$(STRIP) $@
+	$(CODESIGN) $@
 endif
 
 # Windows version builds two, one with a conole and one without it
@@ -355,6 +423,7 @@ $(BIN)/tester/sameboy_tester: $(CORE_OBJECTS) $(TESTER_OBJECTS)
 	$(CC) $^ -o $@ $(LDFLAGS)
 ifeq ($(CONF), release)
 	$(STRIP) $@
+	$(CODESIGN) $@
 endif
 
 $(BIN)/tester/sameboy_tester.exe: $(CORE_OBJECTS) $(SDL_OBJECTS)
@@ -388,6 +457,10 @@ $(BIN)/SDL/background.bmp: SDL/background.bmp
 $(BIN)/SDL/Shaders: Shaders
 	-@$(MKDIR) -p $@
 	cp -rf Shaders/*.fsh $@
+    
+$(BIN)/SDL/Palettes: Misc/Palettes
+	-@$(MKDIR) -p $@
+	cp -rf Misc/Palettes/*.sbp $@
 
 # Boot ROMs
 
@@ -401,6 +474,7 @@ $(OBJ)/BootROMs/SameBoyLogo.pb12: $(OBJ)/BootROMs/SameBoyLogo.2bpp $(PB12_COMPRE
 $(PB12_COMPRESS): BootROMs/pb12.c
 	$(NATIVE_CC) -std=c99 -Wall -Werror $< -o $@
 
+$(BIN)/BootROMs/cgb0_boot.bin: BootROMs/cgb_boot.asm
 $(BIN)/BootROMs/agb_boot.bin: BootROMs/cgb_boot.asm
 $(BIN)/BootROMs/cgb_boot_fast.bin: BootROMs/cgb_boot.asm
 $(BIN)/BootROMs/sgb2_boot: BootROMs/sgb_boot.asm
@@ -415,6 +489,49 @@ $(BIN)/BootROMs/%.bin: BootROMs/%.asm $(OBJ)/BootROMs/SameBoyLogo.pb12
 # Libretro Core (uses its own build system)
 libretro:
 	CFLAGS="$(WARNINGS)" $(MAKE) -C libretro
+
+# install for Linux/FreeDesktop/etc.
+# Does not install mimetype icons because FreeDesktop is cursed abomination with no right to exist.
+# If you somehow find a reasonable way to make associate an icon with an extension in this dumpster
+# fire of a desktop environment, open an issue or a pull request
+ifneq ($(FREEDESKTOP),)
+ICON_NAMES := apps/sameboy mimetypes/x-gameboy-rom mimetypes/x-gameboy-color-rom
+ICON_SIZES := 16x16 32x32 64x64 128x128 256x256 512x512
+ICONS := $(foreach name,$(ICON_NAMES), $(foreach size,$(ICON_SIZES),$(DESTDIR)$(PREFIX)/share/icons/hicolor/$(size)/$(name).png))
+install: sdl $(DESTDIR)$(PREFIX)/share/mime/packages/sameboy.xml $(ICONS) FreeDesktop/sameboy.desktop
+	-@$(MKDIR) -p $(dir $(DESTDIR)$(PREFIX))
+	mkdir -p $(DESTDIR)$(DATA_DIR)/ $(DESTDIR)$(PREFIX)/bin/
+	cp -rf $(BIN)/SDL/* $(DESTDIR)$(DATA_DIR)/
+	mv $(DESTDIR)$(DATA_DIR)/sameboy $(DESTDIR)$(PREFIX)/bin/sameboy
+ifeq ($(DESTDIR),)
+	-update-mime-database -n $(PREFIX)/share/mime
+	-xdg-desktop-menu install --novendor --mode system FreeDesktop/sameboy.desktop
+	-xdg-icon-resource forceupdate --mode system
+	-xdg-desktop-menu forceupdate --mode system
+ifneq ($(SUDO_USER),)
+	-su $(SUDO_USER) -c "xdg-desktop-menu forceupdate --mode system"
+endif
+else
+	-@$(MKDIR) -p $(DESTDIR)$(PREFIX)/share/applications/
+	cp FreeDesktop/sameboy.desktop $(DESTDIR)$(PREFIX)/share/applications/sameboy.desktop
+endif
+
+$(DESTDIR)$(PREFIX)/share/icons/hicolor/%/apps/sameboy.png: FreeDesktop/AppIcon/%.png
+	-@$(MKDIR) -p $(dir $@)
+	cp -f $^ $@
+
+$(DESTDIR)$(PREFIX)/share/icons/hicolor/%/mimetypes/x-gameboy-rom.png: FreeDesktop/Cartridge/%.png
+	-@$(MKDIR) -p $(dir $@)
+	cp -f $^ $@
+
+$(DESTDIR)$(PREFIX)/share/icons/hicolor/%/mimetypes/x-gameboy-color-rom.png: FreeDesktop/ColorCartridge/%.png
+	-@$(MKDIR) -p $(dir $@)
+	cp -f $^ $@
+
+$(DESTDIR)$(PREFIX)/share/mime/packages/sameboy.xml: FreeDesktop/sameboy.xml
+	-@$(MKDIR) -p $(dir $@)
+	cp -f $^ $@
+endif
 
 # Clean
 clean:
